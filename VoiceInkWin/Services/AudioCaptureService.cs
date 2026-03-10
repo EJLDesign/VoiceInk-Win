@@ -10,7 +10,7 @@ public class AudioCaptureService : IDisposable
     private readonly object _bufferLock = new();
     private bool _isRecording;
     private DateTime _lastSoundTime;
-    private float _silenceThreshold = 0.01f;
+    private float _silenceThreshold = 0.003f;
     private float _maxDuration = 120f;
     private CancellationTokenSource? _cts;
 

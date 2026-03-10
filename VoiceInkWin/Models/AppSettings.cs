@@ -27,7 +27,7 @@ public class AppSettings
 
     // Audio
     public string AudioInputDeviceId { get; set; } = "";
-    public float SilenceThreshold { get; set; } = 0.01f;
+    public float SilenceThreshold { get; set; } = 0.003f;
     public float MaxRecordingDuration { get; set; } = 120.0f;
 
     // UI

@@ -1,0 +1,10 @@
+<UserControl x:Class="VoiceInkWin.Views.HotkeyRecorderControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Focusable="True">
+    <Border BorderBrush="{Binding BorderColor}" BorderThickness="2" CornerRadius="4" Padding="10,6"
+            Background="{Binding BackgroundColor}" MinWidth="200"
+            MouseDown="Border_MouseDown">
+        <TextBlock Text="{Binding DisplayText}" HorizontalAlignment="Center" FontSize="13"/>
+    </Border>
+</UserControl>

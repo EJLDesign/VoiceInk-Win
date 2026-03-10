@@ -1,0 +1,39 @@
+## .NET / Visual Studio
+bin/
+obj/
+*.user
+*.suo
+*.cache
+*.dll
+*.exe
+*.pdb
+*.nupkg
+.vs/
+*.rsuser
+*.userprefs
+
+## NuGet
+packages/
+*.nupkg
+project.lock.json
+
+## Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+build/
+bld/
+
+## IDE
+.idea/
+*.sln.docstates
+.vscode/
+
+## OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+## Project specific
+*.tmp

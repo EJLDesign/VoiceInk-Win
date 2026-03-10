@@ -102,6 +102,24 @@ public partial class GeneralSettingsViewModel : ObservableObject
             return;
         }
 
+        // Check if it's a specific left/right modifier key
+        string? specificName = _capturedKeyCode switch
+        {
+            0xA0 => "Left Shift",
+            0xA1 => "Right Shift",
+            0xA2 => "Left Ctrl",
+            0xA3 => "Right Ctrl",
+            0xA4 => "Left Alt",
+            0xA5 => "Right Alt",
+            _ => null
+        };
+
+        if (specificName != null && _capturedModifiers == 0)
+        {
+            HotkeyDisplay = specificName;
+            return;
+        }
+
         var parts = new List<string>();
         if ((_capturedModifiers & 0x0002) != 0) parts.Add("Ctrl");
         if ((_capturedModifiers & 0x0001) != 0) parts.Add("Alt");

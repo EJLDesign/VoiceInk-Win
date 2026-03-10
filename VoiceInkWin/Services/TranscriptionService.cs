@@ -1,5 +1,7 @@
 using Whisper.net;
 
+using static VoiceInkWin.App;
+
 namespace VoiceInkWin.Services;
 
 public class TranscriptionService : IDisposable
@@ -46,9 +48,12 @@ public class TranscriptionService : IDisposable
         using var processor = builder.Build();
 
         var segments = new List<string>();
+        int segIndex = 0;
         await foreach (var segment in processor.ProcessAsync(audioData))
         {
             var text = segment.Text.Trim();
+            App.Log($"Whisper segment[{segIndex}]: \"{text}\"");
+            segIndex++;
             // Filter blank/noise segments
             if (!string.IsNullOrWhiteSpace(text) &&
                 !text.Equals("[BLANK_AUDIO]", StringComparison.OrdinalIgnoreCase) &&
@@ -59,6 +64,16 @@ public class TranscriptionService : IDisposable
         }
 
         var result = string.Join(" ", segments).Trim();
+
+        // Detect Whisper hallucination (same word repeated, e.g. "you you you")
+        var words = result.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (words.Length > 1 && words.All(w => w.Equals(words[0], StringComparison.OrdinalIgnoreCase)))
+        {
+            App.Log($"Hallucination detected: \"{result}\"");
+            StatusChanged?.Invoke("No speech detected");
+            return "";
+        }
+
         StatusChanged?.Invoke(string.IsNullOrEmpty(result) ? "No speech detected" : "Done");
         return result;
     }

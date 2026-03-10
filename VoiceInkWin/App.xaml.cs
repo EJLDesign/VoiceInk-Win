@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using Hardcodet.Wpf.TaskbarNotification;
@@ -20,58 +21,99 @@ public partial class App : Application
     private RecordingOverlayWindow? _overlayWindow;
     private RecordingOverlayViewModel? _overlayViewModel;
 
+    private static readonly string LogFile = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VoiceInk", "error.log");
+
+    public static void Log(string message)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(LogFile)!);
+            File.AppendAllText(LogFile, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}");
+        }
+        catch { }
+    }
+
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
 
-        // Single-instance check
-        _singleInstance = new SingleInstanceGuard();
-        if (!_singleInstance.IsFirstInstance)
+        // Global exception handlers
+        DispatcherUnhandledException += (_, args) =>
         {
-            MessageBox.Show("VoiceInk is already running.", "VoiceInk", MessageBoxButton.OK, MessageBoxImage.Information);
-            Shutdown();
-            return;
-        }
-
-        // Build DI container
-        var services = new ServiceCollection();
-        ConfigureServices(services);
-        _serviceProvider = services.BuildServiceProvider();
-
-        // Load settings
-        var settingsService = _serviceProvider.GetRequiredService<SettingsService>();
-        settingsService.Load();
-
-        // Get main view model
-        _mainViewModel = _serviceProvider.GetRequiredService<MainViewModel>();
-
-        // Setup system tray
-        SetupTrayIcon();
-
-        // Setup overlay
-        _overlayViewModel = _serviceProvider.GetRequiredService<RecordingOverlayViewModel>();
-        _overlayWindow = new RecordingOverlayWindow(_overlayViewModel);
-
-        // Wire recording events to overlay
-        _mainViewModel.RecordingStarted += () => Dispatcher.Invoke(() =>
+            Log($"UI Exception: {args.Exception}");
+            MessageBox.Show($"Error: {args.Exception.Message}\n\nSee {LogFile}", "VoiceInk Error");
+            args.Handled = true;
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
         {
-            if (settingsService.Settings.ShowFloatingHud)
+            Log($"Fatal Exception: {args.ExceptionObject}");
+        };
+        TaskScheduler.UnobservedTaskException += (_, args) =>
+        {
+            Log($"Task Exception: {args.Exception}");
+            args.SetObserved();
+        };
+
+        try
+        {
+            Log("VoiceInk starting...");
+
+            // Single-instance check
+            _singleInstance = new SingleInstanceGuard();
+            if (!_singleInstance.IsFirstInstance)
             {
-                _overlayWindow.Show();
-                _overlayWindow.StartAnimation();
+                MessageBox.Show("VoiceInk is already running.", "VoiceInk", MessageBoxButton.OK, MessageBoxImage.Information);
+                Shutdown();
+                return;
             }
-        });
 
-        _mainViewModel.RecordingStopped += () => Dispatcher.Invoke(() =>
+            // Build DI container
+            var services = new ServiceCollection();
+            ConfigureServices(services);
+            _serviceProvider = services.BuildServiceProvider();
+
+            // Load settings
+            var settingsService = _serviceProvider.GetRequiredService<SettingsService>();
+            settingsService.Load();
+            Log("Settings loaded");
+
+            // Get main view model
+            _mainViewModel = _serviceProvider.GetRequiredService<MainViewModel>();
+
+            // Setup system tray
+            SetupTrayIcon();
+            Log("Tray icon ready");
+
+            // Setup overlay
+            _overlayViewModel = _serviceProvider.GetRequiredService<RecordingOverlayViewModel>();
+            _overlayWindow = new RecordingOverlayWindow(_overlayViewModel);
+
+            // Wire recording events to overlay — BeginInvoke to avoid blocking hook thread
+            _mainViewModel.RecordingStarted += () => Dispatcher.BeginInvoke(() =>
+            {
+                Log("Recording started - showing overlay");
+                _overlayWindow.StartAnimation();
+            });
+
+            _mainViewModel.RecordingStopped += () => Dispatcher.BeginInvoke(() =>
+            {
+                Log("Recording stopped - hiding overlay");
+                _overlayWindow.StopAnimation();
+            });
+
+            _mainViewModel.StateChanged += () => Dispatcher.BeginInvoke(UpdateTrayIcon);
+
+            // Initialize (load model, register hotkeys)
+            _mainViewModel.Initialize();
+            Log("Initialized. Status: " + _mainViewModel.StatusText);
+        }
+        catch (Exception ex)
         {
-            _overlayWindow.StopAnimation();
-            _overlayWindow.Hide();
-        });
-
-        _mainViewModel.StateChanged += () => Dispatcher.Invoke(UpdateTrayIcon);
-
-        // Initialize (load model, register hotkeys)
-        _mainViewModel.Initialize();
+            Log($"Startup failed: {ex}");
+            MessageBox.Show($"VoiceInk failed to start:\n\n{ex.Message}\n\nSee {LogFile}", "VoiceInk Error");
+            Shutdown();
+        }
     }
 
     private static void ConfigureServices(ServiceCollection services)
@@ -107,14 +149,13 @@ public partial class App : Application
             ContextMenu = BuildTrayMenu()
         };
 
-        // Set default icon (blue circle as fallback)
         try
         {
             _trayIcon.Icon = CreateTrayIcon("idle");
         }
-        catch
+        catch (Exception ex)
         {
-            // Icon will be blank if resource missing - that's OK for now
+            Log($"Tray icon creation failed: {ex.Message}");
         }
 
         _trayIcon.TrayMouseDoubleClick += (_, _) => OpenSettings();
@@ -201,8 +242,8 @@ public partial class App : Application
                         ? entry.Text[..57] + "..."
                         : entry.Text;
                     var histItem = new MenuItem { Header = $"[{entry.ModeName}] {displayText}" };
-                    var e = entry;
-                    histItem.Click += (_, _) => _mainViewModel.CopyHistoryEntry(e);
+                    var capturedEntry = entry;
+                    histItem.Click += (_, _) => _mainViewModel.CopyHistoryEntry(capturedEntry);
                     historyMenu.Items.Add(histItem);
                 }
             }
@@ -232,7 +273,6 @@ public partial class App : Application
 
     private static Icon CreateTrayIcon(string state)
     {
-        // Generate a simple icon programmatically
         int size = 16;
         using var bmp = new Bitmap(size, size);
         using var g = Graphics.FromImage(bmp);
@@ -240,9 +280,9 @@ public partial class App : Application
 
         var color = state switch
         {
-            "recording" => Color.FromArgb(255, 68, 68),      // Red
-            "transcribing" => Color.FromArgb(255, 170, 0),    // Orange
-            _ => Color.FromArgb(85, 85, 255)                  // Blue
+            "recording" => Color.FromArgb(255, 68, 68),
+            "transcribing" => Color.FromArgb(255, 170, 0),
+            _ => Color.FromArgb(85, 85, 255)
         };
 
         using var brush = new SolidBrush(color);
@@ -250,7 +290,6 @@ public partial class App : Application
 
         if (state == "recording")
         {
-            // Inner white dot for mic
             using var whiteBrush = new SolidBrush(Color.White);
             g.FillEllipse(whiteBrush, 5, 3, 6, 7);
             g.FillRectangle(whiteBrush, 7, 10, 2, 3);
@@ -273,6 +312,7 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        Log("VoiceInk shutting down");
         _mainViewModel?.Dispose();
         _overlayWindow?.Close();
         _trayIcon?.Dispose();

@@ -31,5 +31,5 @@ public class AppSettings
     public float MaxRecordingDuration { get; set; } = 120.0f;
 
     // UI
-    public bool ShowFloatingHud { get; set; } = false;
+    public bool ShowFloatingHud { get; set; } = true;
 }

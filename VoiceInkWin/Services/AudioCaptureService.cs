@@ -1,4 +1,5 @@
 using NAudio.Wave;
+using static VoiceInkWin.App;
 
 namespace VoiceInkWin.Services;
 
@@ -18,6 +19,7 @@ public class AudioCaptureService : IDisposable
     public event Action? MaxDurationReached;
 
     public bool IsRecording => _isRecording;
+    public bool SilenceDetectionEnabled { get; set; } = true;
 
     public void Configure(string? deviceId, float silenceThreshold, float maxDuration)
     {
@@ -37,18 +39,28 @@ public class AudioCaptureService : IDisposable
 
         // Find device number
         int deviceNumber = -1; // default
+        App.Log($"Looking for audio device: \"{deviceId}\"");
+        for (int i = 0; i < WaveInEvent.DeviceCount; i++)
+        {
+            var caps = WaveInEvent.GetCapabilities(i);
+            App.Log($"  Device[{i}]: \"{caps.ProductName}\"");
+        }
         if (!string.IsNullOrEmpty(deviceId))
         {
             for (int i = 0; i < WaveInEvent.DeviceCount; i++)
             {
                 var caps = WaveInEvent.GetCapabilities(i);
-                if (caps.ProductName == deviceId)
+                // Use StartsWith for partial match — NAudio truncates names to 31 chars
+                if (caps.ProductName == deviceId ||
+                    deviceId.StartsWith(caps.ProductName) ||
+                    caps.ProductName.StartsWith(deviceId))
                 {
                     deviceNumber = i;
                     break;
                 }
             }
         }
+        App.Log($"Selected device number: {deviceNumber}");
 
         _waveIn = new WaveInEvent
         {
@@ -91,15 +103,18 @@ public class AudioCaptureService : IDisposable
 
         AudioDataAvailable?.Invoke(samples);
 
-        // Check silence
-        float rms = CalculateRms(samples);
-        if (rms > _silenceThreshold)
+        // Check silence (disabled in PTT mode)
+        if (SilenceDetectionEnabled)
         {
-            _lastSoundTime = DateTime.UtcNow;
-        }
-        else if ((DateTime.UtcNow - _lastSoundTime).TotalSeconds > 2.0)
-        {
-            SilenceTimeout?.Invoke();
+            float rms = CalculateRms(samples);
+            if (rms > _silenceThreshold)
+            {
+                _lastSoundTime = DateTime.UtcNow;
+            }
+            else if ((DateTime.UtcNow - _lastSoundTime).TotalSeconds > 2.0)
+            {
+                SilenceTimeout?.Invoke();
+            }
         }
     }
 

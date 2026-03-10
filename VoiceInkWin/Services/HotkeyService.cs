@@ -5,13 +5,17 @@ namespace VoiceInkWin.Services;
 
 public class HotkeyService : IDisposable
 {
-    private readonly HotkeyInterop _interop = new();
     private NativeMethods.LowLevelKeyboardProc? _keyboardProc;
     private IntPtr _hookHandle;
-    private bool _pttActive;
-    private uint _pttKeyCode;
-    private uint _pttModifiers;
     private bool _disposed;
+
+    // Hotkey config
+    private uint _hotkeyVk;
+    private bool _isPushToTalk;
+
+    // State tracking
+    private bool _pttActive;
+    private bool _hotkeyDown; // tracks if the hotkey is currently held (for modifier-only keys)
 
     public event Action? ToggleRecording;
     public event Action? PttKeyDown;
@@ -19,91 +23,69 @@ public class HotkeyService : IDisposable
 
     public void Start()
     {
-        _interop.Start();
-        _interop.HotkeyPressed += () => ToggleRecording?.Invoke();
-    }
-
-    public bool RegisterToggleHotkey(int keyCode, int modifiers)
-    {
-        if (keyCode == 0) return false;
-        return _interop.Register(1, (uint)modifiers, (uint)keyCode);
-    }
-
-    public void UnregisterToggleHotkey()
-    {
-        _interop.Unregister();
-    }
-
-    public void EnablePushToTalk(uint keyCode, uint modifiers)
-    {
-        DisablePushToTalk();
-        _pttKeyCode = keyCode;
-        _pttModifiers = modifiers;
-        _pttActive = false;
-
         _keyboardProc = LowLevelKeyboardCallback;
         var moduleHandle = NativeMethods.GetModuleHandle(null);
         _hookHandle = NativeMethods.SetWindowsHookEx(
             NativeMethods.WH_KEYBOARD_LL, _keyboardProc, moduleHandle, 0);
     }
 
-    public void DisablePushToTalk()
+    public void SetHotkey(uint vkCode, bool pushToTalk)
     {
-        if (_hookHandle != IntPtr.Zero)
-        {
-            NativeMethods.UnhookWindowsHookEx(_hookHandle);
-            _hookHandle = IntPtr.Zero;
-        }
-        _keyboardProc = null;
+        _hotkeyVk = vkCode;
+        _isPushToTalk = pushToTalk;
         _pttActive = false;
+        _hotkeyDown = false;
     }
 
     private IntPtr LowLevelKeyboardCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
-        if (nCode >= 0)
+        if (nCode >= 0 && _hotkeyVk != 0)
         {
             var kbd = Marshal.PtrToStructure<NativeMethods.KBDLLHOOKSTRUCT>(lParam);
             int msg = wParam.ToInt32();
+            bool isDown = msg == NativeMethods.WM_KEYDOWN || msg == NativeMethods.WM_SYSKEYDOWN;
+            bool isUp = msg == NativeMethods.WM_KEYUP || msg == NativeMethods.WM_SYSKEYUP;
 
-            if (kbd.vkCode == _pttKeyCode)
+            if (kbd.vkCode == _hotkeyVk)
             {
-                bool modifiersMatch = CheckModifiers(_pttModifiers);
+                if (isDown && !_hotkeyDown)
+                {
+                    _hotkeyDown = true;
 
-                if ((msg == NativeMethods.WM_KEYDOWN || msg == NativeMethods.WM_SYSKEYDOWN) && !_pttActive && modifiersMatch)
-                {
-                    _pttActive = true;
-                    PttKeyDown?.Invoke();
+                    if (_isPushToTalk && !_pttActive)
+                    {
+                        _pttActive = true;
+                        PttKeyDown?.Invoke();
+                    }
                 }
-                else if ((msg == NativeMethods.WM_KEYUP || msg == NativeMethods.WM_SYSKEYUP) && _pttActive)
+                else if (isUp && _hotkeyDown)
                 {
-                    _pttActive = false;
-                    PttKeyUp?.Invoke();
+                    _hotkeyDown = false;
+
+                    if (_isPushToTalk && _pttActive)
+                    {
+                        _pttActive = false;
+                        PttKeyUp?.Invoke();
+                    }
+                    else if (!_isPushToTalk)
+                    {
+                        ToggleRecording?.Invoke();
+                    }
                 }
             }
         }
         return NativeMethods.CallNextHookEx(_hookHandle, nCode, wParam, lParam);
     }
 
-    private static bool CheckModifiers(uint required)
-    {
-        if (required == 0) return true;
-
-        bool ctrl = (required & NativeMethods.MOD_CONTROL) != 0;
-        bool alt = (required & NativeMethods.MOD_ALT) != 0;
-        bool shift = (required & NativeMethods.MOD_SHIFT) != 0;
-
-        if (ctrl && NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) >= 0) return false;
-        if (alt && NativeMethods.GetAsyncKeyState(NativeMethods.VK_MENU) >= 0) return false;
-        if (shift && NativeMethods.GetAsyncKeyState(NativeMethods.VK_SHIFT) >= 0) return false;
-
-        return true;
-    }
-
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
-        DisablePushToTalk();
-        _interop.Dispose();
+        if (_hookHandle != IntPtr.Zero)
+        {
+            NativeMethods.UnhookWindowsHookEx(_hookHandle);
+            _hookHandle = IntPtr.Zero;
+        }
+        _keyboardProc = null;
     }
 }

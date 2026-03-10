@@ -20,6 +20,9 @@ public partial class MainViewModel : ObservableObject, IDisposable
     private readonly HistoryService _historyService;
     private readonly SettingsService _settingsService;
 
+    private readonly SemaphoreSlim _recordingLock = new(1, 1);
+    private volatile bool _isProcessing;
+
     [ObservableProperty] private string _statusText = "Idle";
     [ObservableProperty] private bool _isRecording;
     [ObservableProperty] private bool _isTranscribing;
@@ -62,15 +65,15 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
         _selectedModeName = settingsService.Settings.SelectedModeName;
 
-        // Wire audio events
+        // Wire audio events — BeginInvoke to avoid blocking the hook thread
         _audioCaptureService.AudioDataAvailable += OnAudioData;
-        _audioCaptureService.SilenceTimeout += () => Application.Current?.Dispatcher.Invoke(StopAndTranscribe);
-        _audioCaptureService.MaxDurationReached += () => Application.Current?.Dispatcher.Invoke(StopAndTranscribe);
+        _audioCaptureService.SilenceTimeout += () => Application.Current?.Dispatcher.BeginInvoke(StopAndTranscribe);
+        _audioCaptureService.MaxDurationReached += () => Application.Current?.Dispatcher.BeginInvoke(StopAndTranscribe);
 
-        // Wire hotkey
-        _hotkeyService.ToggleRecording += () => Application.Current?.Dispatcher.Invoke(OnToggleRecording);
-        _hotkeyService.PttKeyDown += () => Application.Current?.Dispatcher.Invoke(StartRecording);
-        _hotkeyService.PttKeyUp += () => Application.Current?.Dispatcher.Invoke(StopAndTranscribe);
+        // Wire hotkey — BeginInvoke to avoid blocking the low-level keyboard hook
+        _hotkeyService.ToggleRecording += () => Application.Current?.Dispatcher.BeginInvoke(OnToggleRecording);
+        _hotkeyService.PttKeyDown += () => Application.Current?.Dispatcher.BeginInvoke(StartRecording);
+        _hotkeyService.PttKeyUp += () => Application.Current?.Dispatcher.BeginInvoke(StopAndTranscribe);
     }
 
     public void Initialize()
@@ -94,17 +97,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
     public void RegisterHotkeys()
     {
         var settings = _settingsService.Settings;
-
-        if (settings.RecordingMode == "toggle")
-        {
-            _hotkeyService.DisablePushToTalk();
-            _hotkeyService.RegisterToggleHotkey(settings.HotkeyKeyCode, settings.HotkeyModifiers);
-        }
-        else
-        {
-            _hotkeyService.UnregisterToggleHotkey();
-            _hotkeyService.EnablePushToTalk((uint)settings.HotkeyKeyCode, (uint)settings.HotkeyModifiers);
-        }
+        bool ptt = settings.RecordingMode == "pushToTalk";
+        _hotkeyService.SetHotkey((uint)settings.HotkeyKeyCode, ptt);
     }
 
     private void TryLoadModel()
@@ -139,7 +133,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     [RelayCommand]
     public void StartRecording()
     {
-        if (IsRecording || IsTranscribing) return;
+        if (IsRecording || IsTranscribing || _isProcessing) return;
 
         if (!_transcriptionService.IsModelLoaded)
         {
@@ -149,19 +143,24 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
         var settings = _settingsService.Settings;
         _audioCaptureService.Configure(settings.AudioInputDeviceId, settings.SilenceThreshold, settings.MaxRecordingDuration);
+        // Disable silence detection in PTT mode — user controls stop by releasing the key
+        _audioCaptureService.SilenceDetectionEnabled = settings.RecordingMode != "pushToTalk";
 
         try
         {
+            _pasteService.SaveForegroundWindow();
             _audioCaptureService.StartRecording(settings.AudioInputDeviceId);
             IsRecording = true;
             CurrentState = AppState.Recording;
             StatusText = "Recording...";
             RecordingStarted?.Invoke();
             StateChanged?.Invoke();
+            App.Log("Recording started");
         }
         catch (Exception ex)
         {
             StatusText = $"Mic error: {ex.Message}";
+            App.Log($"Mic error: {ex}");
         }
     }
 
@@ -172,38 +171,70 @@ public partial class MainViewModel : ObservableObject, IDisposable
     {
         if (!IsRecording) return;
 
-        var audioData = _audioCaptureService.StopRecording();
-        IsRecording = false;
-        IsTranscribing = true;
-        CurrentState = AppState.Transcribing;
-        StatusText = "Transcribing...";
-        RecordingStopped?.Invoke();
-        StateChanged?.Invoke();
+        // Non-blocking try-acquire to prevent double-fire
+        if (!await _recordingLock.WaitAsync(0)) return;
 
         try
         {
+            _isProcessing = true;
+
+            var audioData = _audioCaptureService.StopRecording();
+            IsRecording = false;
+            IsTranscribing = true;
+            CurrentState = AppState.Transcribing;
+            StatusText = "Transcribing...";
+            RecordingStopped?.Invoke();
+            StateChanged?.Invoke();
+
+            // Calculate audio RMS to check if mic is actually picking up sound
+            double rmsSum = 0;
+            float maxSample = 0;
+            for (int i = 0; i < audioData.Length; i++)
+            {
+                rmsSum += audioData[i] * audioData[i];
+                float abs = Math.Abs(audioData[i]);
+                if (abs > maxSample) maxSample = abs;
+            }
+            float rms = audioData.Length > 0 ? (float)Math.Sqrt(rmsSum / audioData.Length) : 0;
+            App.Log($"Audio buffer: {audioData.Length} samples ({audioData.Length / 16000.0:F2}s), RMS={rms:F6}, Peak={maxSample:F6}");
+
             if (audioData.Length < 1600) // Less than 0.1s at 16kHz
             {
+                App.Log("Too short, skipping transcription");
                 StatusText = "Too short";
                 return;
             }
 
+            if (rms < 0.0003f)
+            {
+                App.Log($"Audio too quiet (RMS={rms:F6}), skipping transcription");
+                StatusText = "No speech detected";
+                return;
+            }
+
             var settings = _settingsService.Settings;
+
+            App.Log("Starting transcription...");
             var rawText = await _transcriptionService.TranscribeAsync(
                 audioData, settings.TranscriptionLanguage,
                 settings.TranslateToEnglish, settings.VocabularyHints);
+            App.Log($"Transcription result: \"{rawText}\"");
 
             if (string.IsNullOrWhiteSpace(rawText))
             {
+                App.Log("No speech detected, skipping");
                 StatusText = "No speech detected";
                 return;
             }
 
             // AI post-processing
             var mode = _modeManager.GetMode(SelectedModeName) ?? _modeManager.AllModes[0];
+            App.Log($"AI processing with mode: {mode.Name}");
             var processedText = await _aiPostProcessor.ProcessAsync(rawText, mode);
+            App.Log($"Processed text: \"{processedText}\"");
 
             // Paste into active app
+            App.Log("Pasting text...");
             await _pasteService.PasteTextAsync(processedText);
 
             // Add to history
@@ -216,16 +247,20 @@ public partial class MainViewModel : ObservableObject, IDisposable
                 SystemSounds.Asterisk.Play();
             }
 
+            App.Log("Done");
             StatusText = "Done";
         }
         catch (Exception ex)
         {
+            App.Log($"Transcription error: {ex}");
             StatusText = $"Error: {ex.Message}";
         }
         finally
         {
             IsTranscribing = false;
             CurrentState = AppState.Idle;
+            _isProcessing = false;
+            _recordingLock.Release();
             StateChanged?.Invoke();
         }
     }
